@@ -21,4 +21,4 @@ def retrieve(query: str, k: int = 3) -> list:
     return results
 
 if __name__ == "__main__":
-    retrieve("What are the payment terms?")
+    retrieve("payment due invoices billing net days")

@@ -33,7 +33,7 @@ ANSWER:"""
 
 if __name__ == "__main__":
     from retriever import retrieve
-    query = "What are the payment terms?"
+    query = "payment due invoices billing net days"
     chunks = retrieve(query)
     result = generate_answer(query, chunks)
     print("\n" + "="*50)

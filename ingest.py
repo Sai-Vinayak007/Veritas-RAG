@@ -15,7 +15,7 @@ def load_pdf(pdf_path: str) -> list[Document]:
 
 def ingest(pdf_path: str):
     documents = load_pdf(pdf_path)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=550, chunk_overlap=100)
     chunks = splitter.split_documents(documents)
     print(f"Created {len(chunks)} chunks")
     embedding_model = HuggingFaceEmbeddings(
