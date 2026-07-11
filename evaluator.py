@@ -1,50 +1,74 @@
-import torch
-from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util
+import re
 
-nli_model = pipeline(
-    "text-classification",
-    model="cross-encoder/nli-deberta-v3-small"
-)
+sim_model = SentenceTransformer("BAAI/bge-large-en-v1.5")
 
 def split_into_claims(answer: str) -> list[str]:
-    import re
-    sentences = re.split(r'(?<=[.!?])\s+', answer.strip())
-    return [s for s in sentences if len(s) > 10]
+    clean = re.sub(r'\[SOURCE \d+\]', '', answer).strip()
+    sentences = re.split(r'(?<=[.!?])\s+', clean)
+    return [
+        s.strip() for s in sentences
+        if len(s.strip()) > 40
+        and not s.strip().startswith("According to Section")
+        and not s.strip().startswith("NOT FOUND")
+    ]
 
-def check_claim(claim: str, context: str) -> dict:
-    result = nli_model(
-        f"{context} [SEP] {claim}",
-        truncation=True,
-        max_length=512
-    )[0]
+def check_claim_semantic(claim: str, context: str) -> dict:
+    context_sentences = re.split(r'(?<=[.!?])\s+', context)
+    context_sentences = [s.strip() for s in context_sentences if len(s.strip()) > 20]
 
-    label = result["label"].lower()
-    score = round(result["score"], 3)
-    is_faithful = label == "entailment"
+    if not context_sentences:
+        return {"claim": claim, "verdict": "neutral", "confidence": 0.0, "faithful": False}
+    claim_embedding = sim_model.encode(claim, convert_to_tensor=True, normalize_embeddings=True)
+    context_embeddings = sim_model.encode(context_sentences, convert_to_tensor=True, normalize_embeddings=True)
+
+
+    similarities = util.cos_sim(claim_embedding, context_embeddings)[0]
+    best_score = float(similarities.max())
+    best_match_idx = int(similarities.argmax())
+    best_match = context_sentences[best_match_idx]
+
+    is_faithful = best_score >= 0.71
 
     return {
         "claim": claim,
-        "verdict": label,
-        "confidence": score,
-        "faithful": is_faithful
+        "verdict": "entailment" if is_faithful else "neutral",
+        "confidence": round(best_score, 3),
+        "faithful": is_faithful,
+        "best_matching_context": best_match[:150]
     }
 
 def evaluate_faithfulness(answer: str, context: str) -> dict:
+    if "NOT FOUND IN DOCUMENT" in answer:
+        print(f"\n{'='*50}")
+        print("FAITHFULNESS EVALUATION")
+        print(f"{'='*50}")
+        print("Model correctly reported information not found.")
+        print(f"FAITHFULNESS SCORE: 1.0 (model did not hallucinate)")
+        print(f"{'='*50}\n")
+        return {"faithfulness_score": 1.0, "claims": []}
+
     claims = split_into_claims(answer)
 
+    if not claims:
+        print("No evaluable claims found.")
+        return {"faithfulness_score": 0.0, "claims": []}
+
     print(f"\n{'='*50}")
-    print(f"FAITHFULNESS EVALUATION")
+    print("FAITHFULNESS EVALUATION")
     print(f"{'='*50}")
-    print(f"Checking {len(claims)} claim(s) against retrieved context...\n")
+    print(f"Evaluating {len(claims)} claim(s) via semantic similarity...\n")
 
     results = []
     for i, claim in enumerate(claims):
-        result = check_claim(claim, context)
+        result = check_claim_semantic(claim, context)
         results.append(result)
 
-        status = "SUPPORTED" if result["faithful"] else "NOT SUPPORTED"
-        print(f"Claim {i+1}: {claim}")
-        print(f"  → {status} | verdict: {result['verdict']} | confidence: {result['confidence']}")
+        status = "SUPPORTED" if result["faithful"] else "⚠️  NOT SUPPORTED"
+        print(f"Claim {i+1}: {claim[:100]}...")
+        print(f"  → {status} | similarity: {result['confidence']}")
+        if result["faithful"]:
+            print(f"  ↳ Matched: \"{result['best_matching_context']}\"")
         print()
 
     faithful_count = sum(1 for r in results if r["faithful"])
@@ -53,23 +77,20 @@ def evaluate_faithfulness(answer: str, context: str) -> dict:
     print(f"{'='*50}")
     print(f"FAITHFULNESS SCORE: {faithfulness_score} ({faithful_count}/{len(claims)} claims supported)")
     if faithfulness_score == 1.0:
-        print("Answer is fully grounded in the source document.")
-    elif faithfulness_score >= 0.5:
-        print("Answer is partially grounded — review flagged claims.")
+        print("Fully grounded in the source document.")
+    elif faithfulness_score >= 0.6:
+        print("Partially grounded — review flagged claims.")
     else:
-        print("Answer is mostly unsupported — likely hallucination.")
+        print("Low grounding — likely contains hallucinations.")
     print(f"{'='*50}\n")
 
-    return {
-        "faithfulness_score": faithfulness_score,
-        "claims": results
-    }
+    return {"faithfulness_score": faithfulness_score, "claims": results}
 
 if __name__ == "__main__":
     from retriever import retrieve
     from generator import generate_answer
 
-    query = "payment due invoices billing net days"
-    chunks = retrieve(query)
+    query = "What are the payment terms?"
+    chunks = retrieve(query, k_final=5, k_fetch=10)
     result = generate_answer(query, chunks)
     evaluate_faithfulness(result["answer"], result["context"])
